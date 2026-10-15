@@ -129,16 +129,23 @@ def contended(root: Path, limit: int, reps: int, writers: int, deep: int) -> dic
     production case, and it is why the contended arm is not simply the cold arm plus lock
     wait.
     """
+    # One writer per deep room, and only deep rooms: `churn(k)` appends to `bench-d{k}`, so
+    # a writer with no deep room of its own writes somewhere `build()` never did. Clamping
+    # here used to hide both ends of that. `deep == 0` still started one writer, on a name
+    # that does not exist, so it *created* a room the report does not count (or, at the
+    # room cap, was refused and died on its first write, leaving the arm uncontended under
+    # the "contended" label). `writers > deep` started `deep` threads while the report kept
+    # printing `writers`. Refused rather than clamped, for the reason `build()` refuses: an
+    # arm that measures something other than what it names is worse than no arm.
+    if not 1 <= writers <= deep:
+        raise ValueError(f"writers ({writers}) must be between 1 and deep ({deep})")
     stop = threading.Event()
 
     def churn(k: int) -> None:
         while not stop.is_set():
             store._write_record(root, f"bench-d{k:06d}", "w", "churn")
 
-    threads = [
-        threading.Thread(target=churn, args=(i,), daemon=True)
-        for i in range(min(writers, max(1, deep)))
-    ]
+    threads = [threading.Thread(target=churn, args=(i,), daemon=True) for i in range(writers)]
     for t in threads:
         t.start()
     try:
@@ -177,6 +184,13 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="bench-rooms-") as tmp:
         root = Path(tmp)
+        # contended() refuses this pair too; checked here as well so a run it would refuse
+        # stops before the setup, which writes `depth` records per deep room first.
+        if args.writers and not 1 <= args.writers <= args.deep:
+            p.error(
+                f"--writers {args.writers} is not between 1 and --deep {args.deep}: each "
+                f"writer churns one deep room of its own, so there is no room for the rest"
+            )
         setup = build(root, args.rooms, args.deep, args.depth)
         rows: list[Row] = []
         for limit in sorted(args.limits):  # ascending: see the docstring
